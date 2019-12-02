@@ -1,0 +1,52 @@
+{
+    "seed": 1,
+
+    "baseline": "LinearFeatureBaseline",
+
+    "env": "AntRandGoalEnv",
+
+    "rollouts_per_meta_task": 20,
+    "max_path_length": 200,
+    "parallel": true,
+
+    "discount": 0.99,
+    "gae_lambda": 1,
+    "normalize_adv": true,
+    "positive_adv": false,
+
+    "hidden_sizes": [64, 64],
+    "learn_std": true,
+
+    "inner_lr": 0.1,
+    "learning_rate": 1e-3,
+    "num_promp_steps": 5,
+    "num_minibatches": 1,
+    "clip_eps": 0.1,
+    "clip_outer": true,
+    "target_outer_step": 0,
+    "target_inner_step": 0,
+    "init_outer_kl_penalty": 0,
+    "init_inner_kl_penalty": 5e-4,
+    "adaptive_outer_kl_penalty": false,
+    "adaptive_inner_kl_penalty": false,
+    "anneal_factor": 1.0,
+
+    "n_itr": 1001,
+    "meta_batch_size": 40,
+    "num_inner_grad_steps": 2,
+
+    "cell_size": 64,
+    "use_betas": false,
+    "shift_gammas": true,
+    "mlp_after_gru": true,
+    "mlp_after_pool": true,
+
+    "log_grad_norm": false,
+    "dump_path": null,
+    "restore_path": null,
+    "te_save_path": null,
+    "num_embeddings": 100,
+    "keep_checkpoint_every_n_hours": 1,
+    "max_checkpoints_to_keep": 20,
+    "save_steps": 50
+}

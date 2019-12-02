@@ -1,0 +1,228 @@
+from meta_policy_search.baselines.linear_baseline import LinearFeatureBaseline
+from meta_policy_search.envs.point_envs.point_env_2d_corner import MetaPointEnvCorner
+from meta_policy_search.envs.point_envs.point_env_2d_momentum import MetaPointEnvMomentum
+from meta_policy_search.envs.point_envs.point_env_2d_momentum_modes import MetaPointEnvMomentumModes
+from meta_policy_search.envs.point_envs.point_env_2d_momentum_2_modes import MetaPointEnvMomentum2Modes
+from meta_policy_search.envs.point_envs.point_env_2d_momentum_6_modes import MetaPointEnvMomentum6Modes
+from meta_policy_search.envs.normalized_env import normalize
+from meta_policy_search.meta_algos.mumo_pro_mp import MumoProMP
+from meta_policy_search.mumo_trainer import Trainer
+from meta_policy_search.samplers.meta_sampler import MetaSampler
+from meta_policy_search.samplers.meta_sample_processor import MetaSampleProcessor
+from meta_policy_search.policies.mumo_meta_gaussian_mlp_policy import MumoMetaGaussianMLPPolicy
+from meta_policy_search.utils import logger
+from meta_policy_search.utils.utils import (
+    set_seed,
+    ClassEncoder,
+    check_git_diff,
+    get_current_git_hash,
+)
+
+import numpy as np
+import tensorflow as tf
+import os
+import json
+import argparse
+import time
+
+meta_policy_search_path = '/'.join(os.path.realpath(
+    os.path.dirname(__file__)).split('/')[:-1])
+
+
+def main(config):
+    set_seed(config['seed'])
+
+    baseline = globals()[config['baseline']]()  # instantiate baseline
+
+    env = globals()[config['env']]()  # instantiate env
+    env = normalize(env)  # apply normalize wrapper to env
+
+    policy = MumoMetaGaussianMLPPolicy(
+        name="meta-policy",
+        obs_dim=np.prod(env.observation_space.shape),
+        action_dim=np.prod(env.action_space.shape),
+        meta_batch_size=config['meta_batch_size'],
+        hidden_sizes=config['hidden_sizes'],
+        cell_size=config['cell_size'],
+        rollouts_per_meta_task=config['rollouts_per_meta_task'],
+        max_path_length=config['max_path_length'],
+        use_betas=config['use_betas'],
+        shift_gammas=config['shift_gammas'],
+        mlp_after_gru=config['mlp_after_gru'],
+        mlp_after_pool=config['mlp_after_pool'],
+    )
+
+    sampler = MetaSampler(
+        env=env,
+        policy=policy,
+        # This batch_size is confusing
+        rollouts_per_meta_task=config['rollouts_per_meta_task'],
+        meta_batch_size=config['meta_batch_size'],
+        max_path_length=config['max_path_length'],
+        parallel=config['parallel'],
+    )
+
+    sample_processor = MetaSampleProcessor(
+        baseline=baseline,
+        discount=config['discount'],
+        gae_lambda=config['gae_lambda'],
+        normalize_adv=config['normalize_adv'],
+    )
+
+    if config['log_grad_norm']:
+        sw = tf.summary.FileWriter(
+            config['dump_path'], graph=tf.get_default_graph())
+    else:
+        sw = None
+
+    algo = MumoProMP(
+        policy=policy,
+        inner_lr=config['inner_lr'],
+        meta_batch_size=config['meta_batch_size'],
+        num_inner_grad_steps=config['num_inner_grad_steps'],
+        learning_rate=config['learning_rate'],
+        num_ppo_steps=config['num_promp_steps'],
+        clip_eps=config['clip_eps'],
+        target_inner_step=config['target_inner_step'],
+        init_inner_kl_penalty=config['init_inner_kl_penalty'],
+        adaptive_inner_kl_penalty=config['adaptive_inner_kl_penalty'],
+        summary_writer=sw,
+    )
+
+    gpu_config = tf.ConfigProto()
+    gpu_config.gpu_options.allow_growth = True  # pylint: disable=E1101
+    sess = tf.Session(config=gpu_config)
+
+    saver = tf.train.Saver(
+        keep_checkpoint_every_n_hours=config['keep_checkpoint_every_n_hours'],
+        max_to_keep=config['max_checkpoints_to_keep'])
+
+    save_path = os.path.join(args.dump_path, 'model.ckpt')
+
+    if config['restore_path'] is not None:
+        logger.log('Restoring parameters from {}'.format(config['restore_path']))
+        saver.restore(sess, config['restore_path'])
+        logger.log('Restored')
+    trainer = Trainer(
+        algo=algo,
+        policy=policy,
+        env=env,
+        sampler=sampler,
+        sample_processor=sample_processor,
+        saver=saver,
+        save_path=save_path,
+        save_steps=config['save_steps'],
+        n_itr=config['n_itr'],
+        num_inner_grad_steps=config['num_inner_grad_steps'],
+        sess=sess,
+    )
+
+    if config['te_save_path'] is not None:
+        trainer.save_task_embeddings(
+            config['num_embeddings'],
+            config['te_save_path'],
+        )
+    else:
+        trainer.train()
+
+
+if __name__ == "__main__":
+    idx = int(time.time())
+
+    parser = argparse.ArgumentParser(
+        description='MMAML with ProMP')
+    parser.add_argument(
+        '--config_file', type=str, default='',
+        help='json file with run specifications')
+    parser.add_argument(
+        '--dump_path', type=str, default=meta_policy_search_path +
+        '/data/mmaml/run_%d' % idx)
+    parser.add_argument('--restore_path', type=str, default=None)
+    parser.add_argument('--log_grad_norm', action='store_true', default=False)
+    parser.add_argument('--te_save_path', default=None)
+    parser.add_argument(
+        '--overrides', type=json.loads, default={},
+        help='accepts json for overriding training parameters')
+
+    args = parser.parse_args()
+
+    if args.config_file:  # load configuration from json file
+        with open(args.config_file, 'r') as f:
+            config = json.load(f)
+
+    else:  # use default config
+
+        config = {
+            'seed': 1,
+
+            'baseline': 'LinearFeatureBaseline',
+
+            'env': 'MetaPointEnvCorner',
+
+            # sampler config
+            'rollouts_per_meta_task': 20,
+            'max_path_length': 100,
+            'parallel': True,
+
+            # sample processor config
+            'discount': 0.99,
+            'gae_lambda': 1,
+            'normalize_adv': True,
+
+            # policy config
+            'hidden_sizes': (64, 64),
+            'learn_std': True,  # whether to learn the standard deviation of the gaussian policy
+
+            # ProMP config
+            'inner_lr': 0.1,  # adaptation step size
+            'learning_rate': 1e-3,  # meta-policy gradient step size
+            'num_promp_steps': 5,  # number of ProMp steps without re-sampling
+            'clip_eps': 0.3,  # clipping range
+            'target_inner_step': 0.01,
+            'init_inner_kl_penalty': 5e-4,
+            # whether to use an adaptive or fixed KL-penalty coefficient
+            'adaptive_inner_kl_penalty': False,
+            'n_itr': 1001,  # number of overall training iterations
+            'meta_batch_size': 40,  # number of sampled meta-tasks per iterations
+            'num_inner_grad_steps': 1,  # number of inner / adaptation gradient steps
+
+            # task modulation config
+            'cell_size': 64,
+            'use_betas': False,
+            'shift_gammas': True,
+            'mlp_after_gru': True,
+            'mlp_after_pool': True,
+
+            # misc
+            'num_embeddings': 100,
+            'keep_checkpoint_every_n_hours': 1,
+            'max_checkpoints_to_keep': 20,
+            'save_steps': 50,
+        }
+
+    config.update(args.overrides)
+    config.update({'dump_path': args.dump_path})
+    config.update({'restore_path': args.restore_path})
+    config.update({'log_grad_norm': args.log_grad_norm})
+    config.update({'te_save_path': args.te_save_path})
+
+    if os.path.isdir(args.dump_path):
+        raise Exception("dump_path exists {}".format(args.dump_path))
+
+    # configure logger
+    logger.configure(dir=args.dump_path, format_strs=['stdout', 'log', 'csv'],
+                     snapshot_mode='last_gap')
+
+    git_hash = get_current_git_hash()
+    git_clean, git_diff = check_git_diff()
+    config['git_hash'] = git_hash
+    config['git_clean'] = git_clean
+    config['git_diff'] = git_diff
+
+    # dump run configuration before starting training
+    json.dump(
+        config, open(args.dump_path + '/params.json', 'w'),
+        cls=ClassEncoder)
+
+    # start the actual algorithm
+    main(config)
